@@ -1,0 +1,136 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions for server-side authorization enforcement
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        getUserData().role == 'ADMIN' || 
+        request.auth.token.email == 'bldiagnosticcentre@gmail.com'
+      );
+    }
+
+    function isStaffOrAdmin() {
+      return isSignedIn() && (
+        getUserData().role in ['STAFF', 'ADMIN'] ||
+        request.auth.token.email == 'bldiagnosticcentre@gmail.com'
+      );
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isStaffOrAdmin();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) && (
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']) || isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Patients collection: IDOR prevention - users strictly access their own patients
+    match /patients/{patientId} {
+      allow read: if isSignedIn() && (resource.data.user_id == request.auth.uid || resource.data.userId == request.auth.uid || isStaffOrAdmin());
+      allow create: if isSignedIn() && (request.resource.data.user_id == request.auth.uid || request.resource.data.userId == request.auth.uid);
+      allow update: if isSignedIn() && (resource.data.user_id == request.auth.uid || resource.data.userId == request.auth.uid || isAdmin());
+      allow delete: if isSignedIn() && (resource.data.user_id == request.auth.uid || resource.data.userId == request.auth.uid || isAdmin());
+    }
+
+    // Bookings collection: secure read by owner or staff
+    match /bookings/{bookingId} {
+      allow read: if isSignedIn() && (resource.data.user_id == request.auth.uid || resource.data.patient.userId == request.auth.uid || isStaffOrAdmin());
+      allow create: if true; // allows booking creation
+      allow update: if isStaffOrAdmin() || (isSignedIn() && (resource.data.user_id == request.auth.uid || resource.data.patient.userId == request.auth.uid));
+      allow delete: if isAdmin();
+    }
+
+    // Diagnostic Reports Metadata: IDOR protected - patient can ONLY view their own reports
+    match /reports/{reportId} {
+      allow read: if isSignedIn() && (resource.data.user_id == request.auth.uid || isStaffOrAdmin());
+      allow create, update: if isStaffOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Secure Report Binary Payloads: Restricted private access
+    match /secure_report_payloads/{reportId} {
+      allow read: if isSignedIn() && (resource.data.user_id == request.auth.uid || isStaffOrAdmin());
+      allow create, update: if isStaffOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Report Audit Logs: Immutable audit trail for uploads, replacements, deactivations
+    match /report_audit_logs/{logId} {
+      allow read: if isStaffOrAdmin();
+      allow create: if isStaffOrAdmin();
+      allow update, delete: if false; // strictly immutable
+    }
+
+    // Report Access Logs: Immutable log tracking views and downloads
+    match /report_access_logs/{logId} {
+      allow read: if isStaffOrAdmin();
+      allow create: if isSignedIn();
+      allow update, delete: if false; // strictly immutable
+    }
+
+    // General System Audit Logs: Immutable audit trail for administrative actions
+    match /audit_logs/{logId} {
+      allow read: if isStaffOrAdmin();
+      allow create: if isStaffOrAdmin();
+      allow update, delete: if false; // strictly immutable
+    }
+
+    // Notifications
+    match /notifications/{notificationId} {
+      allow read: if isSignedIn() && (resource.data.userId == request.auth.uid || isStaffOrAdmin());
+      allow create: if isStaffOrAdmin() || (isSignedIn() && request.resource.data.userId == request.auth.uid);
+      allow update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // Catalogue & Packages
+    match /test_catalogue/{testId} {
+      allow read: if true;
+      allow write: if isStaffOrAdmin();
+    }
+
+    match /packages/{packageId} {
+      allow read: if true;
+      allow write: if isStaffOrAdmin();
+    }
+
+    // Leads & Inquiries
+    match /leads/{leadId} {
+      allow read: if isStaffOrAdmin();
+      allow create: if true;
+      allow update, delete: if isStaffOrAdmin();
+    }
+
+    // Contact Enquiries
+    match /contact_enquiries/{enquiryId} {
+      allow read: if isStaffOrAdmin();
+      allow create: if true;
+      allow update, delete: if isStaffOrAdmin();
+    }
+
+    // Google Sheets Sync Logs
+    match /sync_logs/{logId} {
+      allow read, write: if isStaffOrAdmin();
+    }
+
+    // Admin Center Settings
+    match /admin_settings/{settingId} {
+      allow read: if true;
+      allow write: if isStaffOrAdmin();
+    }
+  }
+}

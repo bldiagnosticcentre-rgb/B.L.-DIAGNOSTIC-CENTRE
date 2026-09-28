@@ -1,0 +1,6 @@
+{
+  "name": "B.L. Diagnostic Center",
+  "description": "Diagnostic and pathology center booking, test directory, and management system. Accurate Diagnosis, Better Health.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
