@@ -47,6 +47,146 @@ export function formatBookingForSheets(booking: Booking): SheetsExportRow {
   };
 }
 
+export interface SheetsSyncResponse {
+  success: boolean;
+  syncStatus?: 'SUCCESS' | 'FAILED' | 'PENDING';
+  attempts?: number;
+  lastError?: string;
+  userId?: string;
+  message?: string;
+}
+
+export interface SheetsBackendStatus {
+  spreadsheetId: string;
+  scriptUrlConfigured: boolean;
+  scriptUrlDomain: string;
+  secretConfigured: boolean;
+  metrics: {
+    totalUsersTracked: number;
+    syncedSuccess: number;
+    failedSyncs: number;
+    pendingSyncs: number;
+  };
+  syncTasks: Array<{
+    userId: string;
+    customerName: string;
+    email: string;
+    status: 'SUCCESS' | 'FAILED' | 'PENDING';
+    attempts: number;
+    lastAttemptAt?: string;
+    lastError?: string;
+  }>;
+  recentLogs: Array<{
+    id: string;
+    timestamp: string;
+    action: string;
+    userId: string;
+    status: 'SUCCESS' | 'FAILED' | 'QUEUED';
+    attempts: number;
+    error?: string;
+    details: string;
+  }>;
+}
+
+/**
+ * Synchronize user profile to Google Sheets via backend proxy.
+ * PostgreSQL / Primary database is the source of truth.
+ * Google Sheets failure does NOT fail or revert user registration.
+ */
+export async function syncUserToSheetsBackend(user: {
+  userId: string;
+  customerName?: string;
+  mobileNumber?: string;
+  mobileVerified?: boolean;
+  email?: string;
+  accountStatus?: string;
+  registrationDate?: string;
+  lastLogin?: string;
+  totalBookings?: number;
+  createdAt?: string;
+}): Promise<SheetsSyncResponse> {
+  try {
+    const payload = {
+      userId: user.userId,
+      customerName: user.customerName || 'User',
+      mobileNumber: user.mobileNumber || '',
+      mobileVerified: user.mobileVerified ?? true,
+      email: user.email || '',
+      accountStatus: user.accountStatus || 'ACTIVE',
+      registrationDate: user.registrationDate || new Date().toISOString().slice(0, 10),
+      lastLogin: user.lastLogin || new Date().toISOString(),
+      totalBookings: user.totalBookings ?? 0,
+      createdAt: user.createdAt || new Date().toISOString()
+    };
+
+    const res = await fetch('/api/sheets/upsert-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return {
+        success: false,
+        syncStatus: 'FAILED',
+        lastError: `Backend HTTP ${res.status}: ${errText.slice(0, 100)}`
+      };
+    }
+
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    console.warn('[SheetsService] Background sync error (non-blocking):', err.message);
+    return {
+      success: false,
+      syncStatus: 'FAILED',
+      lastError: err.message
+    };
+  }
+}
+
+/**
+ * Fetch server-side Google Sheets synchronization status
+ */
+export async function fetchBackendSheetsStatus(): Promise<SheetsBackendStatus | null> {
+  try {
+    const res = await fetch('/api/sheets/sync-status');
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn('[SheetsService] Failed to load backend sync status:', err);
+    return null;
+  }
+}
+
+/**
+ * Trigger retry for all pending / failed sync tasks on the backend
+ */
+export async function retryBackendSheetsSync(): Promise<{ success: boolean; message: string; retriedCount?: number }> {
+  try {
+    const res = await fetch('/api/sheets/retry', { method: 'POST' });
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    return { success: false, message: err.message || 'Retry request failed.' };
+  }
+}
+
+/**
+ * Test synchronization using dedicated dummy account
+ */
+export async function testDummyUserSync(): Promise<any> {
+  try {
+    const res = await fetch('/api/sheets/test-sync', { method: 'POST' });
+    return await res.json();
+  } catch (err: any) {
+    return { success: false, message: err.message };
+  }
+}
+
 export function exportBookingsToCSV(bookings: Booking[]): void {
   const headers = [
     'Booking ID',

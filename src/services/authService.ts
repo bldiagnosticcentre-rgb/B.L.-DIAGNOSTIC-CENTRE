@@ -9,6 +9,7 @@ import {
 import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from '../lib/firebase';
 import { UserProfile, UserRole } from '../types/auth';
+import { syncUserToSheetsBackend } from './sheetsService';
 
 const USERS_COLLECTION = 'users';
 
@@ -87,6 +88,23 @@ export async function registerUser(params: {
   };
 
   await setDoc(doc(db, USERS_COLLECTION, uid), profile);
+
+  // Synchronize approved user profile to Google Sheets Users tab via server-side proxy
+  // Primary database is source of truth; Sheets failure will NOT fail registration.
+  syncUserToSheetsBackend({
+    userId: profile.uid,
+    customerName: profile.displayName,
+    mobileNumber: profile.phone,
+    email: profile.email,
+    accountStatus: 'ACTIVE',
+    registrationDate: profile.createdAt.slice(0, 10),
+    lastLogin: new Date().toISOString(),
+    totalBookings: 0,
+    createdAt: profile.createdAt
+  }).catch(err => {
+    console.warn('[AuthService] Non-critical sheets sync delay:', err);
+  });
+
   return profile;
 }
 
@@ -108,6 +126,18 @@ export async function loginUser(email: string, password: string): Promise<UserPr
       await fbSignOut(auth);
       throw new Error('Account has been deactivated. Please contact B.L. Diagnostic Center.');
     }
+
+    // Update lastLogin operational sync asynchronously
+    syncUserToSheetsBackend({
+      userId: profile.uid,
+      customerName: profile.displayName,
+      mobileNumber: profile.phone,
+      email: profile.email,
+      accountStatus: profile.isActive ? 'ACTIVE' : 'INACTIVE',
+      lastLogin: new Date().toISOString(),
+      createdAt: profile.createdAt
+    }).catch(console.warn);
+
     return profile;
   } catch (err: any) {
     // Return safe, sanitized error messages
@@ -137,4 +167,19 @@ export async function updateUserProfile(uid: string, updates: Partial<Pick<UserP
     ...updates,
     updatedAt: new Date().toISOString()
   });
+
+  // Sync updated allowed fields to Google Sheets Users tab
+  getDoc(docRef).then(snap => {
+    if (snap.exists()) {
+      const u = snap.data() as UserProfile;
+      syncUserToSheetsBackend({
+        userId: uid,
+        customerName: u.displayName,
+        mobileNumber: u.phone,
+        email: u.email,
+        accountStatus: u.isActive ? 'ACTIVE' : 'INACTIVE',
+        createdAt: u.createdAt
+      }).catch(console.warn);
+    }
+  }).catch(console.warn);
 }
