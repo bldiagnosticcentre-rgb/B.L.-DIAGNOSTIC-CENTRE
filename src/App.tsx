@@ -17,6 +17,7 @@ import { UserDashboardView } from './components/dashboard/UserDashboardView';
 import { AdminPanel } from './components/AdminPanel';
 import { AuthProvider } from './contexts/AuthContext';
 import { AuthView } from './components/auth/AuthView';
+import { FirebaseAuthView } from './components/auth/FirebaseAuthView';
 import { UserDashboard } from './components/dashboard/UserDashboard';
 import { ProtectedRoute } from './components/auth/ProtectedRoute';
 import { DiagnosticTest } from './types';
@@ -40,15 +41,42 @@ export default function App() {
     initializeCatalogueDatabase();
     initializePackagesDatabase();
 
-    // Check for admin or deep-link hash
-    const hash = window.location.hash.replace('#', '').trim();
-    if (hash.startsWith('admin/')) {
-      const sub = hash.replace('admin/', '') as AdminRoute;
-      setAdminSubTab(sub);
-      setCurrentPage('admin');
-    } else if (hash === 'admin') {
-      setCurrentPage('admin');
-    }
+    // Check for deep-link hash and listen to hashchange
+    const syncFromHash = () => {
+      const rawHash = window.location.hash.replace('#', '').trim();
+      if (!rawHash) return;
+
+      if (rawHash.startsWith('admin/')) {
+        const sub = rawHash.replace('admin/', '') as AdminRoute;
+        setAdminSubTab(sub);
+        setCurrentPage('admin');
+      } else if (rawHash === 'admin') {
+        setCurrentPage('admin');
+      } else if (
+        [
+          'home',
+          'about',
+          'services',
+          'tests',
+          'test-details',
+          'packages',
+          'package-details',
+          'home-collection',
+          'book',
+          'contact',
+          'faq',
+          'login',
+          'register',
+          'dashboard',
+        ].includes(rawHash)
+      ) {
+        setCurrentPage(rawHash as PublicPage);
+      }
+    };
+
+    syncFromHash();
+    window.addEventListener('hashchange', syncFromHash);
+    return () => window.removeEventListener('hashchange', syncFromHash);
   }, []);
 
   const handleNavigate = (page: PublicPage, param?: string) => {
@@ -58,11 +86,15 @@ export default function App() {
     if (param && (page === 'packages' || page === 'package-details')) {
       setSelectedPackageId(param);
       setCurrentPage('package-details');
+      window.location.hash = 'package-details';
       window.scrollTo({ top: 0, behavior: 'smooth' });
       return;
     }
     if (page === 'admin') {
       if (param) setAdminSubTab(param as AdminRoute);
+      window.location.hash = param ? `admin/${param}` : 'admin';
+    } else {
+      window.location.hash = page === 'home' ? '' : page;
     }
     setCurrentPage(page);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -237,14 +269,14 @@ export default function App() {
           )}
 
           {currentPage === 'login' && (
-            <AuthView
+            <FirebaseAuthView
               initialMode="login"
               onNavigate={handleNavigate}
             />
           )}
 
           {currentPage === 'register' && (
-            <AuthView
+            <FirebaseAuthView
               initialMode="register"
               onNavigate={handleNavigate}
             />

@@ -12,6 +12,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { PatientRecord } from '../types/bookingSystem';
+import { syncEntityToGoogleSheets } from './sheetsService';
 
 const PATIENTS_COLLECTION = 'patients';
 
@@ -20,17 +21,37 @@ const PATIENTS_COLLECTION = 'patients';
  */
 export async function getPatientsForUser(userId: string): Promise<PatientRecord[]> {
   if (!userId) return [];
+
+  // Check localStorage cache first
   try {
-    const q = query(
-      collection(db, PATIENTS_COLLECTION),
-      where('user_id', '==', userId)
-    );
-    const snap = await getDocs(q);
-    const list: PatientRecord[] = [];
-    snap.forEach(d => list.push(d.data() as PatientRecord));
-    return list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    const raw = localStorage.getItem(`patients_${userId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+
+  try {
+    const fetchFirestore = async (): Promise<PatientRecord[]> => {
+      const q = query(
+        collection(db, PATIENTS_COLLECTION),
+        where('user_id', '==', userId)
+      );
+      const snap = await getDocs(q);
+      const list: PatientRecord[] = [];
+      snap.forEach(d => list.push(d.data() as PatientRecord));
+      const sorted = list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      try {
+        localStorage.setItem(`patients_${userId}`, JSON.stringify(sorted));
+      } catch {}
+      return sorted;
+    };
+
+    return await Promise.race([
+      fetchFirestore(),
+      new Promise<PatientRecord[]>((resolve) => setTimeout(() => resolve([]), 800)),
+    ]);
   } catch (err) {
-    console.error('Error fetching patients for user:', err);
     return [];
   }
 }
@@ -83,7 +104,27 @@ export async function createPatient(params: {
     updated_at: now
   };
 
+  // 1. Primary DB Write
   await setDoc(doc(db, PATIENTS_COLLECTION, patient_id), record);
+
+  // 2. Non-blocking Google Sheets Sync to Patients tab
+  syncEntityToGoogleSheets({
+    entityType: 'Patients',
+    entityId: patient_id,
+    operation: 'CREATE',
+    record: {
+      id: patient_id,
+      user_id: record.user_id,
+      patient_name: record.full_name,
+      date_of_birth: `Age: ${record.age}`,
+      gender: record.gender,
+      phone: record.phone || '',
+      status: 'ACTIVE',
+      created_at: record.created_at,
+      updated_at: record.updated_at
+    }
+  }).catch(() => {});
+
   return record;
 }
 
@@ -93,7 +134,7 @@ export async function createPatient(params: {
 export async function updatePatient(
   patientId: string,
   userId: string,
-  updates: Partial<Pick<PatientRecord, 'full_name' | 'age' | 'gender' | 'relation' | 'phone' | 'is_active'>>
+  updates: Partial<Pick<PatientRecord, 'full_name' | 'age' | 'gender' | 'relation' | 'phone' | 'address' | 'notes' | 'is_active'>>
 ): Promise<void> {
   const docRef = doc(db, PATIENTS_COLLECTION, patientId);
   const snap = await getDoc(docRef);
@@ -101,10 +142,30 @@ export async function updatePatient(
     throw new Error('Unauthorized: cannot edit patient that does not belong to you.');
   }
 
+  const existing = snap.data() as PatientRecord;
+  const now = new Date().toISOString();
   await updateDoc(docRef, {
     ...updates,
-    updated_at: new Date().toISOString()
+    updated_at: now
   });
+
+  const merged: PatientRecord = { ...existing, ...updates, updated_at: now };
+  syncEntityToGoogleSheets({
+    entityType: 'Patients',
+    entityId: patientId,
+    operation: 'UPDATE',
+    record: {
+      id: patientId,
+      user_id: merged.user_id,
+      patient_name: merged.full_name,
+      date_of_birth: `Age: ${merged.age}`,
+      gender: merged.gender,
+      phone: merged.phone || '',
+      status: merged.is_active === false ? 'INACTIVE' : 'ACTIVE',
+      created_at: merged.created_at,
+      updated_at: now
+    }
+  }).catch(() => {});
 }
 
 /**
@@ -113,3 +174,30 @@ export async function updatePatient(
 export async function togglePatientActive(patientId: string, userId: string, isActive: boolean): Promise<void> {
   await updatePatient(patientId, userId, { is_active: isActive });
 }
+
+export async function createPatientRecord(params: {
+  userId: string;
+  fullName: string;
+  age: number;
+  gender: 'Male' | 'Female' | 'Other';
+  relation: 'Self' | 'Father' | 'Mother' | 'Spouse' | 'Child' | 'Other';
+  phone?: string;
+  address?: string;
+  notes?: string;
+}): Promise<PatientRecord> {
+  return createPatient({
+    user_id: params.userId,
+    full_name: params.fullName,
+    age: params.age,
+    gender: params.gender,
+    relation: params.relation,
+    phone: params.phone,
+  });
+}
+
+export const updatePatientRecord = updatePatient;
+
+export async function archivePatientRecord(patientId: string, userId: string): Promise<void> {
+  await togglePatientActive(patientId, userId, false);
+}
+

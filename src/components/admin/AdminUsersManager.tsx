@@ -200,7 +200,10 @@ export const AdminUsersManager: React.FC = () => {
                 </tr>
               ) : (
                 filteredUsers.map((u) => {
-                  const isSuperAdminEmail = u.email === 'bldiagnosticcentre@gmail.com';
+                  const isSuperAdmin =
+                    u.phone === '+919649183422' ||
+                    u.phone === '9649183422' ||
+                    u.email === 'bldiagnosticcentre@gmail.com';
                   return (
                     <tr key={u.uid} className="hover:bg-slate-50/70 transition-colors">
                       <td className="px-4 py-3.5">
@@ -211,14 +214,16 @@ export const AdminUsersManager: React.FC = () => {
                       </td>
 
                       <td className="px-4 py-3.5 space-y-0.5">
-                        <div className="flex items-center gap-1.5 text-slate-700">
-                          <Mail className="w-3 h-3 text-slate-400 shrink-0" />
-                          <span>{u.email}</span>
-                        </div>
                         {u.phone && u.phone !== 'N/A' && (
+                          <div className="flex items-center gap-1.5 text-slate-800 font-semibold text-xs tabular-nums">
+                            <Phone className="w-3 h-3 text-emerald-600 shrink-0" />
+                            <span>{u.phone.startsWith('+91') ? u.phone : `+91 ${u.phone}`}</span>
+                          </div>
+                        )}
+                        {u.email && (
                           <div className="flex items-center gap-1.5 text-slate-500 text-[11px]">
-                            <Phone className="w-3 h-3 text-slate-400 shrink-0" />
-                            <span>+91 {u.phone}</span>
+                            <Mail className="w-3 h-3 text-slate-400 shrink-0" />
+                            <span>{u.email}</span>
                           </div>
                         )}
                       </td>
@@ -262,7 +267,7 @@ export const AdminUsersManager: React.FC = () => {
                       <td className="px-4 py-3.5 text-right space-x-1 whitespace-nowrap">
                         {/* Role Change Button */}
                         <button
-                          disabled={isSuperAdminEmail || updatingId === u.uid}
+                          disabled={isSuperAdmin || updatingId === u.uid}
                           onClick={() => {
                             setSelectedUser(u);
                             setNewRoleSelect(u.role);
@@ -276,7 +281,7 @@ export const AdminUsersManager: React.FC = () => {
 
                         {/* Toggle Status Button */}
                         <button
-                          disabled={isSuperAdminEmail || updatingId === u.uid}
+                          disabled={isSuperAdmin || updatingId === u.uid}
                           onClick={() => handleToggleStatus(u)}
                           className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg transition-colors disabled:opacity-40 ${
                             u.isActive

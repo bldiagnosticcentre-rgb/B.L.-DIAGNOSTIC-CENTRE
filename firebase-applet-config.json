@@ -1,11 +1,11 @@
 {
-  "projectId": "gen-lang-client-0143294825",
-  "appId": "1:807978426666:web:c5a2a706d626cd8d53fe53",
-  "apiKey": "AIzaSyCi_xTqXkN2fSisHWu7V3Zxqw5HNnNEgjw",
-  "authDomain": "gen-lang-client-0143294825.firebaseapp.com",
+  "projectId": "bl-diagonosis",
+  "appId": "1:1021341821774:web:e646cfbe4df9efdb838c1f",
+  "apiKey": "AIzaSyCzgClaiCxEoX5Ziig1Zf1A7Fi3tBgI0lM",
+  "authDomain": "bl-diagonosis.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-bldiagnosticcent-72cb8c9e-5186-4594-8d4d-0f89399f312f",
-  "storageBucket": "gen-lang-client-0143294825.firebasestorage.app",
-  "messagingSenderId": "807978426666",
+  "storageBucket": "bl-diagonosis.firebasestorage.app",
+  "messagingSenderId": "1021341821774",
   "measurementId": "",
   "oAuthClientId": "807978426666-u50nn2vrps8t319cd0gd6canqj57t3ak.apps.googleusercontent.com",
   "recaptchaSiteKey": ""

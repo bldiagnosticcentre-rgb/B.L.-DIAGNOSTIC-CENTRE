@@ -1,22 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { DiagnosticReport } from '../../types/reports';
-import { getReportsForUser } from '../../services/reportSecurityService';
+import {
+  getReportsForUser,
+  accessSecureReportFile,
+} from '../../services/reportSecurityService';
 import { useAuth } from '../../contexts/AuthContext';
-import { SecureReportViewerModal } from './SecureReportViewerModal';
-import { 
-  FileText, 
-  Download, 
-  Eye, 
-  Search, 
-  Calendar, 
-  ShieldCheck, 
-  AlertCircle, 
-  RefreshCw,
-  Clock,
-  Lock,
-  ChevronRight
+import {
+  FileText,
+  Download,
+  ExternalLink,
+  Search,
+  Eye,
+  AlertCircle,
 } from 'lucide-react';
-import { Badge, Button, LoadingState, EmptyState } from '../ui/DesignSystem';
+import {
+  Badge,
+  Button,
+  SkeletonList,
+  EmptyState,
+} from '../ui/DesignSystem';
 
 interface UserReportsViewProps {
   onNavigateToBooking?: (bookingId: string) => void;
@@ -25,11 +27,12 @@ interface UserReportsViewProps {
 export const UserReportsView: React.FC<UserReportsViewProps> = ({
   onNavigateToBooking,
 }) => {
-  const { user } = useAuth();
+  const { user, isStaffOrAdmin } = useAuth();
   const [reports, setReports] = useState<DiagnosticReport[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [search, setSearch] = useState<string>('');
-  const [activeReportForModal, setActiveReportForModal] = useState<DiagnosticReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [searchFilter, setSearchFilter] = useState('');
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string>('');
 
   const loadReports = async () => {
     if (!user) return;
@@ -43,138 +46,194 @@ export const UserReportsView: React.FC<UserReportsViewProps> = ({
     loadReports();
   }, [user]);
 
-  const filteredReports = reports.filter(r => {
-    if (!search.trim()) return true;
-    const q = search.toLowerCase();
+  const handleSecureAccess = async (
+    report: DiagnosticReport,
+    action: 'VIEW' | 'DOWNLOAD'
+  ) => {
+    if (!user) return;
+    setDownloadingId(report.report_id);
+    setErrorMessage('');
+    try {
+      const { blobUrl, fileName } = await accessSecureReportFile({
+        reportId: report.report_id,
+        userId: user.uid,
+        userEmail: user.email,
+        isStaffOrAdmin,
+        action,
+      });
+
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      if (action === 'DOWNLOAD') {
+        link.download = fileName;
+      } else {
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+      }
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Unable to access report right now.');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
+  const filtered = reports.filter((r) => {
+    const q = searchFilter.toLowerCase().trim();
+    if (!q) return true;
     return (
       r.report_title.toLowerCase().includes(q) ||
-      r.booking_id.toLowerCase().includes(q) ||
       r.patient_name.toLowerCase().includes(q) ||
-      r.test_names.some(t => t.toLowerCase().includes(q))
+      r.booking_id.toLowerCase().includes(q) ||
+      r.report_id.toLowerCase().includes(q)
     );
   });
 
   if (loading) {
-    return <LoadingState message="Loading your certified diagnostic reports..." />;
+    return <SkeletonList rows={3} />;
   }
 
   return (
-    <div className="space-y-6">
-      {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+    <div className="space-y-5">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-bold text-slate-900">
-            Certified Diagnostic Reports
-          </h2>
-          <p className="text-xs text-slate-500">
-            Pathologist-verified laboratory results. Access is encrypted and tied to your patient account.
+          <h2 className="text-lg font-bold text-[#0F294A]">Diagnostic Reports</h2>
+          <p className="text-xs text-slate-600">
+            View and download released pathology reports for your bookings.
           </p>
         </div>
 
-        {/* Security badge */}
-        <div className="flex items-center gap-1.5 text-xs text-emerald-800 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-lg">
-          <ShieldCheck className="w-4 h-4 text-emerald-600" />
-          <span>Restricted Private Access (IDOR Protected)</span>
-        </div>
-      </div>
-
-      {/* Filter / Search Bar */}
-      <div className="bg-white p-3.5 rounded-xl border border-slate-200 flex items-center gap-3 shadow-xs">
-        <div className="relative flex-1">
-          <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            type="text"
-            placeholder="Search reports by title, test name, booking ID, or patient name..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-3 py-1.5 text-xs rounded-lg border border-slate-300 focus:outline-hidden focus:ring-2 focus:ring-[#0F294A]"
-          />
-        </div>
-        {search && (
-          <button
-            onClick={() => setSearch('')}
-            className="text-xs text-slate-500 hover:text-slate-800"
-          >
-            Clear
-          </button>
+        {reports.length > 0 && (
+          <div className="relative w-full sm:w-72">
+            <label htmlFor="reports-search-input" className="sr-only">
+              Filter reports
+            </label>
+            <Search
+              className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2"
+              aria-hidden="true"
+            />
+            <input
+              id="reports-search-input"
+              type="text"
+              placeholder="Search Report ID, Booking ID, Patient..."
+              value={searchFilter}
+              onChange={(e) => setSearchFilter(e.target.value)}
+              className="w-full pl-8 pr-3 py-2 text-xs rounded-lg border border-slate-300 bg-white focus:outline-hidden focus:ring-2 focus:ring-[#0F294A]"
+            />
+          </div>
         )}
       </div>
 
-      {/* Reports List */}
-      {filteredReports.length === 0 ? (
-        <EmptyState
-          title="No Diagnostic Reports Found"
-          description={search ? "No reports matched your search criteria." : "Certified laboratory reports will appear here once specimens are analyzed."}
-        />
-      ) : (
-        <div className="divide-y divide-slate-100 bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-          {filteredReports.map((report) => (
-            <div
-              key={report.report_id}
-              className="p-4 sm:p-5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 hover:bg-slate-50/70 transition-colors"
-            >
-              <div className="space-y-1.5">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="font-bold text-slate-900 text-sm">{report.report_title}</h3>
-                  <Badge variant={report.is_active ? 'green' : 'amber'}>
-                    {report.is_active ? 'Available' : 'Archived'}
-                  </Badge>
-                  <span className="font-mono text-[11px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded">
-                    {report.booking_id}
-                  </span>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
-                  <span>Patient: <strong className="text-slate-800">{report.patient_name}</strong></span>
-                  <span>•</span>
-                  <span>Uploaded: <strong className="text-slate-700">{new Date(report.uploaded_at).toLocaleDateString()}</strong></span>
-                  <span>•</span>
-                  <span>Size: {(report.file_size / 1024).toFixed(1)} KB</span>
-                </div>
-
-                {/* Tests included */}
-                {report.test_names && report.test_names.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                    {report.test_names.map((t, idx) => (
-                      <span key={idx} className="bg-slate-100 text-slate-600 text-[10px] font-medium px-2 py-0.5 rounded">
-                        {t}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Actions */}
-              <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
-                {onNavigateToBooking && (
-                  <button
-                    onClick={() => onNavigateToBooking(report.booking_id)}
-                    className="text-xs font-semibold text-slate-500 hover:text-slate-800 underline px-2"
-                  >
-                    View Booking
-                  </button>
-                )}
-
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => setActiveReportForModal(report)}
-                >
-                  <Eye className="w-3.5 h-3.5" />
-                  View & Download
-                </Button>
-              </div>
-            </div>
-          ))}
+      {errorMessage && (
+        <div
+          role="alert"
+          className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xl flex items-center gap-2"
+        >
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{errorMessage}</span>
         </div>
       )}
 
-      {/* Secure Viewer Modal */}
-      {activeReportForModal && (
-        <SecureReportViewerModal
-          report={activeReportForModal}
-          onClose={() => setActiveReportForModal(null)}
+      {filtered.length === 0 ? (
+        <EmptyState
+          title="No reports available yet."
+          description={
+            searchFilter
+              ? `No diagnostic reports matched "${searchFilter}".`
+              : 'Once your diagnostic test sample is processed at B.L. Diagnostic Center, your digital report will appear here for secure viewing and download.'
+          }
         />
+      ) : (
+        <div className="space-y-3">
+          {filtered.map((rep) => {
+            const isBusy = downloadingId === rep.report_id;
+            return (
+              <div
+                key={rep.report_id}
+                className="bg-white p-5 rounded-xl border border-slate-200 shadow-2xs flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4"
+              >
+                <div className="flex items-start gap-3.5">
+                  <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center justify-center shrink-0">
+                    <FileText className="w-5 h-5" aria-hidden="true" />
+                  </div>
+
+                  <div className="space-y-1 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono font-bold text-[#0F294A] tabular-nums">
+                        Report ID: {rep.report_id}
+                      </span>
+                      <span className="text-slate-300">|</span>
+                      <span className="font-mono text-slate-600 tabular-nums">
+                        Booking ID: {rep.booking_id}
+                      </span>
+                      <Badge variant="green">Ready</Badge>
+                    </div>
+
+                    <h3 className="text-sm font-bold text-slate-900">
+                      {rep.report_title}
+                    </h3>
+
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-slate-600">
+                      <span>
+                        Patient:{' '}
+                        <strong className="text-slate-900">{rep.patient_name}</strong>
+                      </span>
+                      <span className="tabular-nums">
+                        Report Date:{' '}
+                        <strong className="text-slate-800">
+                          {new Date(rep.uploaded_at).toLocaleDateString()}
+                        </strong>
+                      </span>
+                    </div>
+
+                    {rep.notes && (
+                      <p className="text-slate-600 bg-slate-50 p-2 rounded border border-slate-100 mt-1">
+                        Note: {rep.notes}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2.5 w-full lg:w-auto justify-end border-t lg:border-t-0 pt-3 lg:pt-0 border-slate-100">
+                  {onNavigateToBooking && (
+                    <button
+                      type="button"
+                      onClick={() => onNavigateToBooking(rep.booking_id)}
+                      className="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span>Booking</span>
+                      <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                    </button>
+                  )}
+
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={isBusy}
+                    onClick={() => handleSecureAccess(rep, 'VIEW')}
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>VIEW</span>
+                  </Button>
+
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    isLoading={isBusy}
+                    onClick={() => handleSecureAccess(rep, 'DOWNLOAD')}
+                  >
+                    <Download className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>DOWNLOAD</span>
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );

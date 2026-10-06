@@ -1,19 +1,35 @@
 export type UserRole = 'USER' | 'STAFF' | 'ADMIN';
 
 export interface UserProfile {
-  uid: string;
-  email: string;
-  displayName: string;
-  phone: string;
+  // Primary Mobile + OTP Database Schema Fields
+  id: string; // UUID
+  mobile_number: string; // Normalized E.164 Indian format: +919649183422
+  name: string;
   role: UserRole;
+  is_verified: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  last_login_at: string;
+
+  // Backward-compatible aliases used across dashboard, booking, and admin components
+  userId?: string; // Formatted User ID (e.g. USER-183422)
+  uid: string; // Same as id
+  mobileNumber?: string; // Same as mobile_number
+  phone: string; // Normalized mobile number (+919649183422)
+  displayName: string; // Same as name
+  email: string; // Optional / empty string (no email login requirement)
+  isVerified?: boolean;
   isActive: boolean;
+  registrationDate?: string;
+  lastLogin?: string;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface FamilyPatient {
   id: string;
-  userId: string; // foreign key to UserProfile.uid
+  userId: string; // foreign key to UserProfile.id / uid
   fullName: string;
   age: number;
   gender: 'Male' | 'Female' | 'Other';

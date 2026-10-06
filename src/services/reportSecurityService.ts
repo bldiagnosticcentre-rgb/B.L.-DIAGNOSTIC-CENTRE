@@ -20,6 +20,7 @@ import {
   ReportMimeType 
 } from '../types/reports';
 import { createUserNotification } from './userService';
+import { syncEntityToGoogleSheets } from './sheetsService';
 
 const REPORTS_COLLECTION = 'reports';
 const PAYLOADS_COLLECTION = 'secure_report_payloads';
@@ -262,6 +263,23 @@ export async function uploadDiagnosticReport(params: {
     type: 'REPORT',
     link: `/dashboard/reports`
   });
+
+  // 6. Non-blocking Google Sheets Sync to Reports tab (Metadata & secure file_reference ONLY — NEVER binary payload)
+  syncEntityToGoogleSheets({
+    entityType: 'Reports',
+    entityId: reportId!,
+    operation: existingReportId ? 'UPDATE' : 'CREATE',
+    record: {
+      id: reportId!,
+      booking_id: bookingId,
+      patient_id: patientId,
+      report_name: reportTitle.trim(),
+      file_reference: `private://reports/${reportId}`,
+      status: 'ACTIVE',
+      uploaded_at: now,
+      updated_at: now
+    }
+  }).catch(() => {});
 
   return reportMetadata;
 }

@@ -20,6 +20,7 @@ import { getPatientById } from './patientService';
 import { getTestByIdFromDB } from './catalogueService';
 import { getPackageByIdFromDB } from './packageService';
 import { createUserNotification } from './userService';
+import { syncEntityToGoogleSheets } from './sheetsService';
 
 const BOOKINGS_COLLECTION = 'bookings';
 const COUNTER_DOC = 'booking_counter';
@@ -158,10 +159,73 @@ export async function createBookingOrder(params: {
     updated_at: now
   };
 
-  // Write booking to database
+  // 1. Write booking to primary database first (Source of Truth)
   await setDoc(doc(db, BOOKINGS_COLLECTION, bookingId), bookingRecord);
 
-  // Send in-app notification to user
+  // 2. Non-blocking Google Sheets Operational Sync (Bookings, Booking_Items, Home_Collection)
+  // NEVER fails or deletes the database record if Google Sheets API encounters an issue
+  syncEntityToGoogleSheets({
+    entityType: 'Bookings',
+    entityId: bookingId,
+    operation: 'CREATE',
+    record: {
+      id: bookingId,
+      booking_number: bookingId,
+      user_id: userId,
+      patient_id: patientId,
+      booking_date: bookingDate,
+      booking_time: timeSlot,
+      collection_type: collectionType,
+      address:
+        collectionType === 'HOME_COLLECTION'
+          ? `${homeAddress || ''}, ${area || ''} ${pincode || ''}`.trim()
+          : 'Center Visit (Pratap Nagar, Jaipur)',
+      status: 'CONFIRMED',
+      patient_name: patient.full_name,
+      phone: patient.phone || '',
+      items,
+      total_amount: totalAmount,
+      created_at: now,
+      updated_at: now
+    }
+  }).catch(() => {});
+
+  if (items.length > 0) {
+    syncEntityToGoogleSheets({
+      entityType: 'Booking_Items',
+      entityId: `${bookingId}-ITEMS`,
+      operation: 'CREATE',
+      record: items.map(it => ({
+        id: it.booking_item_id,
+        booking_id: bookingId,
+        test_id: it.test_id,
+        test_name_snapshot: it.test_name_snapshot,
+        price_snapshot: it.price_snapshot,
+        created_at: now
+      }))
+    }).catch(() => {});
+  }
+
+  if (collectionType === 'HOME_COLLECTION') {
+    syncEntityToGoogleSheets({
+      entityType: 'Home_Collection',
+      entityId: `HC-${bookingId}`,
+      operation: 'CREATE',
+      record: {
+        id: `HC-${bookingId}`,
+        booking_id: bookingId,
+        patient_id: patientId,
+        address: homeAddress?.trim() || '',
+        area: area?.trim() || '',
+        pincode: pincode?.trim() || '',
+        status: 'CONFIRMED',
+        created_at: now,
+        updated_at: now
+      }
+    }).catch(() => {});
+  }
+
+  // 3. Send in-app notification to user
   await createUserNotification({
     userId,
     title: `Booking Confirmed: ${bookingId}`,
@@ -177,14 +241,21 @@ export async function createBookingOrder(params: {
  * Fetch all bookings for a user
  */
 export async function getBookingsForUser(userId: string): Promise<BookingRecord[]> {
+  if (!userId) return [];
   try {
-    const q = query(collection(db, BOOKINGS_COLLECTION), where('user_id', '==', userId));
-    const snap = await getDocs(q);
-    const list: BookingRecord[] = [];
-    snap.forEach(d => list.push(d.data() as BookingRecord));
-    return list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    const fetchFirestore = async (): Promise<BookingRecord[]> => {
+      const q = query(collection(db, BOOKINGS_COLLECTION), where('user_id', '==', userId));
+      const snap = await getDocs(q);
+      const list: BookingRecord[] = [];
+      snap.forEach(d => list.push(d.data() as BookingRecord));
+      return list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    };
+
+    return await Promise.race([
+      fetchFirestore(),
+      new Promise<BookingRecord[]>((resolve) => setTimeout(() => resolve([]), 800)),
+    ]);
   } catch (err) {
-    console.error('Error fetching bookings for user:', err);
     return [];
   }
 }
@@ -233,10 +304,57 @@ export async function updateBookingWorkflowStatus(
 
   await updateDoc(docRef, updates);
 
-  // Notify user if report ready or status advanced
+  // Notify user & sync updated booking to Google Sheets without creating duplicates
   const snap = await getDoc(docRef);
   if (snap.exists()) {
     const booking = snap.data() as BookingRecord;
+
+    syncEntityToGoogleSheets({
+      entityType: 'Bookings',
+      entityId: booking.booking_id,
+      operation: 'UPDATE',
+      record: {
+        id: booking.booking_id,
+        booking_number: booking.booking_id,
+        user_id: booking.user_id,
+        patient_id: booking.patient_id,
+        patient_name: booking.patient_name_snapshot,
+        phone: booking.patient_phone_snapshot || '',
+        booking_date: booking.booking_date,
+        booking_time: booking.time_slot,
+        collection_type: booking.collection_type,
+        address:
+          booking.collection_type === 'HOME_COLLECTION'
+            ? `${booking.home_address || ''}, ${booking.area || ''} ${booking.pincode || ''}`.trim()
+            : 'Center Visit (Pratap Nagar, Jaipur)',
+        status: booking.status,
+        created_at: booking.created_at,
+        updated_at: now,
+      },
+    }).catch(() => {});
+
+    if (booking.collection_type === 'HOME_COLLECTION') {
+      syncEntityToGoogleSheets({
+        entityType: 'Home_Collection',
+        entityId: `HC-${booking.booking_id}`,
+        operation: 'UPDATE',
+        record: {
+          id: `HC-${booking.booking_id}`,
+          booking_id: booking.booking_id,
+          user_id: booking.user_id,
+          patient_id: booking.patient_id,
+          patient_name: booking.patient_name_snapshot,
+          phone: booking.patient_phone_snapshot || '',
+          address: booking.home_address || '',
+          area: booking.area || '',
+          pincode: booking.pincode || '',
+          status: booking.status,
+          created_at: booking.created_at,
+          updated_at: now,
+        },
+      }).catch(() => {});
+    }
+
     if (status === 'COMPLETED' || reportData) {
       await createUserNotification({
         userId: booking.user_id,

@@ -8,6 +8,10 @@ export type BookingWorkflowStatus =
 
 export type CollectionType = 'HOME_COLLECTION' | 'CENTER_VISIT';
 
+export type PatientGender = 'Male' | 'Female' | 'Other';
+
+export type PatientRelation = 'Self' | 'Father' | 'Mother' | 'Spouse' | 'Child' | 'Other';
+
 export interface BookingItemSnapshot {
   booking_item_id: string;
   booking_id: string;
@@ -55,9 +59,11 @@ export interface PatientRecord {
   user_id: string; // strictly owned by user
   full_name: string;
   age: number;
-  gender: 'Male' | 'Female' | 'Other';
-  relation: 'Self' | 'Father' | 'Mother' | 'Spouse' | 'Child' | 'Other';
+  gender: PatientGender;
+  relation: PatientRelation;
   phone?: string;
+  address?: string;
+  notes?: string;
   is_active: boolean;
   created_at: string;
   updated_at: string;

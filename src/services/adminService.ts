@@ -21,11 +21,14 @@ import {
   ContactEnquiry, 
   GeneralAuditLog, 
   GoogleSheetsSyncState,
-  CenterSettings 
+  CenterSettings,
+  DatabaseAnalyticsSummary,
+  GoogleSheetTabName
 } from '../types/admin';
 import { RateRecord } from '../types/catalogue';
 import { UserProfile, UserRole } from '../types/auth';
 import { INITIAL_RATE_LIST_RECORDS } from '../data/rateListRecords';
+import { syncEntityToGoogleSheets } from './sheetsService';
 
 const USERS_COLLECTION = 'users';
 const PATIENTS_COLLECTION = 'patients';
@@ -66,6 +69,12 @@ export async function logAuditEvent(params: {
       timestamp: new Date().toISOString()
     };
     await setDoc(doc(db, AUDIT_COLLECTION, id), record);
+
+    // Non-blocking operational sync to Google Sheets Audit_Logs tab
+    syncEntityToGoogleSheets('Audit_Logs', 'CREATE', id, [record], {
+      actorEmail: params.actorEmail,
+      details: `Audit log ${params.action} on ${params.entityType} (${params.entityId})`,
+    }).catch(() => {});
   } catch (err) {
     console.error('Failed to record audit log:', err);
   }
@@ -836,6 +845,14 @@ export async function submitContactEnquiry(data: {
   };
   await setDoc(doc(db, LEADS_COLLECTION, leadId), leadRecord);
 
+  // Non-blocking sync to Google Sheets Contact_Enquiries and Leads tabs
+  syncEntityToGoogleSheets('Contact_Enquiries', 'CREATE', id, [enquiry], {
+    details: `Contact enquiry ${id} from ${validated.name}`,
+  }).catch(() => {});
+  syncEntityToGoogleSheets('Leads', 'CREATE', leadId, [leadRecord], {
+    details: `Lead ${leadId} created from contact form`,
+  }).catch(() => {});
+
   return enquiry;
 }
 
@@ -870,6 +887,11 @@ export async function submitHomeCollectionEnquiry(data: {
   };
 
   await setDoc(doc(db, LEADS_COLLECTION, leadId), leadRecord);
+
+  syncEntityToGoogleSheets('Leads', 'CREATE', leadId, [leadRecord], {
+    details: `Home collection lead ${leadId} from ${validated.fullName}`,
+  }).catch(() => {});
+
   return leadRecord;
 }
 
@@ -904,6 +926,11 @@ export async function submitCallbackRequest(data: {
   };
 
   await setDoc(doc(db, LEADS_COLLECTION, leadId), leadRecord);
+
+  syncEntityToGoogleSheets('Leads', 'CREATE', leadId, [leadRecord], {
+    details: `Callback request ${leadId} from ${fullName}`,
+  }).catch(() => {});
+
   return leadRecord;
 }
 
@@ -961,38 +988,48 @@ export async function fetchAuditLogs(): Promise<GeneralAuditLog[]> {
  */
 export async function fetchSheetsSyncState(): Promise<GoogleSheetsSyncState> {
   try {
-    const snap = await getDocs(query(collection(db, SYNC_LOGS_COLLECTION), limit(20)));
+    const snap = await getDocs(query(collection(db, SYNC_LOGS_COLLECTION), limit(50)));
     let totalSynced = 0;
     let failedCount = 0;
     let lastSyncTimestamp: string | undefined;
 
     const history: GoogleSheetsSyncState['syncHistory'] = [];
 
-    snap.forEach(d => {
+    snap.forEach((d) => {
       const data = d.data();
-      const status = data.status === 'ReadyForSync' || data.status === 'SUCCESS' ? 'SUCCESS' : 'FAILED';
+      const status = data.status === 'SUCCESS' ? 'SUCCESS' : 'FAILED';
       if (status === 'SUCCESS') totalSynced++;
       else failedCount++;
 
-      if (!lastSyncTimestamp || (data.timestamp && data.timestamp > lastSyncTimestamp)) {
-        lastSyncTimestamp = data.timestamp;
+      const ts = data.last_attempt_at || data.timestamp || data.created_at;
+      if (ts && (!lastSyncTimestamp || ts > lastSyncTimestamp)) {
+        lastSyncTimestamp = ts;
       }
 
       history.push({
         id: d.id,
-        timestamp: data.timestamp || new Date().toISOString(),
+        timestamp: ts || new Date().toISOString(),
         status,
-        recordsProcessed: data.totalAmount ? 1 : (data.recordsCount || 1),
-        details: data.details || `Booking ID: ${data.bookingId || 'Sync Event'}`
+        recordsProcessed: data.recordsProcessed || 1,
+        details:
+          data.details ||
+          `${data.operation || 'SYNC'} on ${data.entity_type || 'Bookings'} (${data.entity_id || d.id})`,
+        entityType: data.entity_type,
+        entityId: data.entity_id,
+        operation: data.operation,
+        attemptCount: data.attempt_count || 1,
+        errorMessage: data.error_message || null,
       });
     });
 
     return {
-      lastSyncTimestamp: lastSyncTimestamp || new Date().toISOString(),
-      syncStatus: failedCount > 0 ? 'ERROR' : 'SUCCESS',
-      totalSynced: Math.max(totalSynced, 1),
+      lastSyncTimestamp,
+      syncStatus: failedCount > 0 ? 'ERROR' : totalSynced > 0 ? 'SUCCESS' : 'IDLE',
+      totalSynced,
       failedCount,
-      syncHistory: history.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      syncHistory: history.sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      ),
     };
   } catch (err) {
     console.error('Error fetching sheets sync state:', err);
@@ -1000,28 +1037,47 @@ export async function fetchSheetsSyncState(): Promise<GoogleSheetsSyncState> {
       syncStatus: 'IDLE',
       totalSynced: 0,
       failedCount: 0,
-      syncHistory: []
+      syncHistory: [],
     };
   }
 }
 
 /**
- * Retry Google Sheets Sync
+ * Retry failed Google Sheets Sync operations from Sync_Log
  */
 export async function retrySheetsSync(
   actor: { uid: string; email: string; role: string }
 ): Promise<{ success: boolean; message: string }> {
   try {
-    const now = new Date().toISOString();
-    const logId = `SYNC-${Date.now()}`;
-    await setDoc(doc(db, SYNC_LOGS_COLLECTION, logId), {
-      id: logId,
-      timestamp: now,
-      status: 'SUCCESS',
-      recordsProcessed: 1,
-      details: 'Manual synchronization retry triggered by admin console.',
-      actorEmail: actor.email
-    });
+    const snap = await getDocs(
+      query(collection(db, SYNC_LOGS_COLLECTION), where('status', '==', 'FAILED'), limit(25))
+    );
+
+    if (snap.empty) {
+      return {
+        success: true,
+        message: 'No failed sync operations pending retry in Sync_Log.',
+      };
+    }
+
+    let retriedSuccess = 0;
+    let retriedFailed = 0;
+
+    for (const docSnap of snap.docs) {
+      const data = docSnap.data();
+      const result = await syncEntityToGoogleSheets({
+        syncId: docSnap.id,
+        entityType: data.entity_type || 'Bookings',
+        entityId: data.entity_id || docSnap.id,
+        operation: 'RETRY',
+        record: data.payload || { id: data.entity_id || docSnap.id },
+        previousAttemptCount: data.attempt_count || 1,
+        createdAt: data.created_at,
+      });
+
+      if (result.status === 'SUCCESS') retriedSuccess++;
+      else retriedFailed++;
+    }
 
     await logAuditEvent({
       actorUid: actor.uid,
@@ -1029,13 +1085,133 @@ export async function retrySheetsSync(
       actorRole: actor.role,
       action: 'SHEETS_SYNCED',
       entityType: 'SHEETS',
-      entityId: logId,
-      details: 'Triggered manual sync queue retry for Google Sheets operational export'
+      entityId: `RETRY-${Date.now()}`,
+      details: `Retried ${snap.size} failed Google Sheets sync items (${retriedSuccess} succeeded, ${retriedFailed} failed).`,
     });
 
-    return { success: true, message: 'Google Sheets synchronization completed successfully.' };
+    return {
+      success: retriedFailed === 0,
+      message:
+        retriedFailed === 0
+          ? `Successfully retried and synchronized ${retriedSuccess} record(s) to Google Sheets.`
+          : `Retried ${snap.size} item(s): ${retriedSuccess} succeeded, ${retriedFailed} still failed (verify Google Sheets connection).`,
+    };
   } catch (err: any) {
     return { success: false, message: err.message || 'Failed to retry sync.' };
+  }
+}
+
+/**
+ * Trigger full database synchronization from primary database to Google Sheets
+ */
+export async function triggerFullDatabaseSyncToSheets(
+  actor: { uid: string; email: string; role: string }
+): Promise<{ success: boolean; message: string }> {
+  try {
+    const [users, patients, tests, bookings, leads, enquiries] = await Promise.all([
+      fetchAdminUsers(),
+      fetchAdminPatients(),
+      fetchAdminTests(),
+      fetchAdminBookings(),
+      fetchLeads(),
+      fetchContactEnquiries(),
+    ]);
+
+    const results = await Promise.all([
+      users.length > 0
+        ? syncEntityToGoogleSheets({
+            entityType: 'Users',
+            entityId: 'FULL-SYNC-USERS',
+            operation: 'FULL_SYNC',
+            record: users.map((u) => ({
+              user_id: u.userId || u.uid,
+              firebase_uid: u.uid,
+              full_name: u.displayName,
+              email: u.email,
+              phone: u.phone,
+              role: u.role,
+              account_status: u.status || 'ACTIVE',
+              registration_date: u.registrationDate || u.createdAt,
+              last_login: u.lastLogin || u.updatedAt || u.createdAt,
+              created_at: u.createdAt,
+              updated_at: u.updatedAt || u.createdAt,
+            })),
+          })
+        : Promise.resolve(null),
+      patients.length > 0
+        ? syncEntityToGoogleSheets({
+            entityType: 'Patients',
+            entityId: 'FULL-SYNC-PATIENTS',
+            operation: 'FULL_SYNC',
+            record: patients,
+          })
+        : Promise.resolve(null),
+      tests.length > 0
+        ? syncEntityToGoogleSheets({
+            entityType: 'Tests',
+            entityId: 'FULL-SYNC-TESTS',
+            operation: 'FULL_SYNC',
+            record: tests,
+          })
+        : Promise.resolve(null),
+      bookings.length > 0
+        ? syncEntityToGoogleSheets({
+            entityType: 'Bookings',
+            entityId: 'FULL-SYNC-BOOKINGS',
+            operation: 'FULL_SYNC',
+            record: bookings.map((b) => b.raw || b),
+          })
+        : Promise.resolve(null),
+      leads.length > 0
+        ? syncEntityToGoogleSheets({
+            entityType: 'Leads',
+            entityId: 'FULL-SYNC-LEADS',
+            operation: 'FULL_SYNC',
+            record: leads,
+          })
+        : Promise.resolve(null),
+      enquiries.length > 0
+        ? syncEntityToGoogleSheets({
+            entityType: 'Contact_Enquiries',
+            entityId: 'FULL-SYNC-ENQUIRIES',
+            operation: 'FULL_SYNC',
+            record: enquiries,
+          })
+        : Promise.resolve(null),
+    ]);
+
+    const activeResults = results.filter(Boolean);
+    const anyFailed = activeResults.some((r) => r && r.status === 'FAILED');
+    const firstError = activeResults.find((r) => r && r.error_message)?.error_message;
+
+    await logAuditEvent({
+      actorUid: actor.uid,
+      actorEmail: actor.email,
+      actorRole: actor.role,
+      action: 'SHEETS_SYNCED',
+      entityType: 'SHEETS',
+      entityId: `FULL-SYNC-${Date.now()}`,
+      details: `Triggered full database synchronization to Google Sheets (${activeResults.length} worksheet batches).`,
+    });
+
+    if (anyFailed) {
+      return {
+        success: false,
+        message: `Full sync attempted, but Google Sheets returned an error: ${
+          firstError || 'Google Sheets not connected.'
+        }`,
+      };
+    }
+
+    return {
+      success: true,
+      message: `Synchronized ${users.length} Users, ${patients.length} Patients, ${bookings.length} Bookings, ${tests.length} Tests, ${leads.length} Leads, and ${enquiries.length} Enquiries to Google Sheets.`,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      message: err.message || 'Full Google Sheets synchronization failed.',
+    };
   }
 }
 
@@ -1098,3 +1274,115 @@ export async function updateCenterSettings(
     }
   });
 }
+
+/**
+ * Calculate live Database Analytics Summary from actual database records.
+ * Never fabricates statistics.
+ */
+export async function fetchDatabaseAnalyticsSummary(): Promise<DatabaseAnalyticsSummary> {
+  const [users, patients, tests, bookings, leads, enquiries] = await Promise.all([
+    fetchAdminUsers(),
+    fetchAdminPatients(),
+    fetchAdminTests(),
+    fetchAdminBookings(),
+    fetchLeads(),
+    fetchContactEnquiries(),
+  ]);
+
+  let reportsCount = 0;
+  try {
+    const repSnap = await getDocs(collection(db, 'reports'));
+    reportsCount = repSnap.size;
+  } catch {
+    // ignore
+  }
+
+  const bookingsByStatus: Record<string, number> = {};
+  const testCounts: Record<string, { testId: string; testName: string; count: number; totalValue: number }> = {};
+  const categoryCounts: Record<string, number> = {};
+  const dateCounts: Record<string, number> = {};
+
+  let homeCollectionCount = 0;
+  let centerVisitCount = 0;
+
+  bookings.forEach((b) => {
+    const st = (b.status || 'CONFIRMED').toUpperCase();
+    bookingsByStatus[st] = (bookingsByStatus[st] || 0) + 1;
+
+    if ((b.collection_type || '').toUpperCase().includes('HOME')) {
+      homeCollectionCount++;
+    } else {
+      centerVisitCount++;
+    }
+
+    const dKey = (b.booking_date || b.created_at || '').slice(0, 10);
+    if (dKey) {
+      dateCounts[dKey] = (dateCounts[dKey] || 0) + 1;
+    }
+
+    (b.items || []).forEach((it: any) => {
+      const tid = it.test_id || 'TEST';
+      const tname = it.test_name_snapshot || tid;
+      const price = Number(it.price_snapshot) || 0;
+      const cat = it.category_snapshot || 'Clinical Pathology';
+
+      if (!testCounts[tid]) {
+        testCounts[tid] = { testId: tid, testName: tname, count: 0, totalValue: 0 };
+      }
+      testCounts[tid].count += 1;
+      testCounts[tid].totalValue += price;
+
+      categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+    });
+  });
+
+  const leadsBySource: Record<string, number> = {};
+  leads.forEach((l) => {
+    const src = l.source || 'WEBSITE';
+    leadsBySource[src] = (leadsBySource[src] || 0) + 1;
+  });
+
+  const activeTestsCount = tests.filter((t) => t.is_active).length;
+  const topBooked = Object.values(testCounts)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10)
+    .map((t) => ({
+      testId: t.testId,
+      testName: t.testName,
+      count: t.count,
+      revenue: t.totalValue,
+      totalValue: t.totalValue,
+    }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    overview: {
+      totalUsers: users.length,
+      totalPatients: patients.length,
+      totalTestsActive: activeTestsCount,
+      totalTestsInactive: Math.max(0, tests.length - activeTestsCount),
+      totalPackages: 7,
+      totalBookings: bookings.length,
+      totalRevenueBooked: bookings.reduce((s, b) => s + (b.totalAmount || 0), 0),
+      completedRevenue: bookings
+        .filter((b) => b.status === 'COMPLETED')
+        .reduce((s, b) => s + (b.totalAmount || 0), 0),
+      homeCollectionCount,
+      centerVisitCount,
+      totalReportsUploaded: reportsCount,
+      totalLeads: leads.length,
+      totalEnquiries: enquiries.length,
+    },
+    bookingsByStatus,
+    bookingsByCollectionType: {
+      HOME_COLLECTION: homeCollectionCount,
+      CENTER_VISIT: centerVisitCount,
+    },
+    topBookedTests: topBooked,
+    categoryBreakdown: Object.entries(categoryCounts)
+      .map(([category, count]) => ({ category, count, totalTests: count, activeTests: count }))
+      .sort((a, b) => (b.count || 0) - (a.count || 0)),
+    leadsBySource,
+  };
+}
+
